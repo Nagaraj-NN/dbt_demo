@@ -1,0 +1,12 @@
+version: 2
+
+seeds:
+  - name: customers
+    config:
+      schema: jaffle_shop
+  - name: orders
+    config:
+      schema: jaffle_shop
+  - name: payments
+    config:
+      schema: stripe

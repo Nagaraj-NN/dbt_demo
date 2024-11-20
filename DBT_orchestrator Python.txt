@@ -1,0 +1,126 @@
+import requests
+import json
+import time
+import logging
+import os
+import argsparse
+import sys
+
+logging.basicConfig(level=logging.INFO)
+
+class DBTCloudClient:
+	"""
+	loosely based on:
+	https://github.com/dlt-hub/dlt/blob/devel/dlt/helpers/dbt_cloud/client.py
+	"""
+	
+	RUN_STATUS_MAP = {
+		1: "Queued",
+		2: "Starting",
+		3: "Running",
+		10: "Success",
+		20: "Error",
+		30: "Cancelled"
+
+	}
+	
+	def __init__(self, account_id, job_id, api_token, git_branch, download_artifacts):
+		self.account_id = account_id
+		self.job_id = job_id
+		self.api_token = api_token
+		self.git_branch = git_branch
+		self.download_artifacts = download_artifacts
+		self.last_log_line = {}
+		self.base_url = "https://cloud.getdbt.com/api/v2"
+	
+	def trigger_dbt_cloud_job(self):
+		url = f"{self.base_url}/accounts/{self.account_id}/jobs/{self.job_id}/run/"
+		headers = {
+			     "Authorization": f"Token {self.api_token}"
+		}
+		body = {
+			     "cause": "Triggered via API", "git_branch": self.git_branch, "target_name_override":"ci"
+		}
+		response = requests.post(url, headers=headers, json=body)
+		if response.status_code == 200:
+			logging.debug("Job triggered successfully!")
+			return response.json()
+		else:
+			logging.error(f"Failed to trigger job. Status code: {response.status_code}")
+			return none
+
+	def poll_dbt_cloud_job(self, run_id):
+		url = f'{self.base_url}/accounts/{self.account_id}/runs/{run_id}/?include_related=["run_steps"]'
+		headers = {
+			     "Authorization": f"Token {self.api_token}"
+		}
+		logging.info(f"Pooling run_id: {run_id}")
+		retry = 0
+		while True:
+			    response = requests.get(url, headers=headers)
+			    if response.status_code == 200:
+				    data = response.json().get('data', {})
+				    run_status = data.get('status', '')
+				    status_message = self.RUN_STATUS_MAP.get(run_status, "Unknown Status")
+				    run_steps = data.get('run_steps', [])
+				    for run_step in run_steps:
+						step_id = run_step['id']
+						logs = run_step.get('logs', '')
+
+						if isinstance(logs, list):
+							logs = ''.join(logs)
+						
+						# Track the last printed log line for this step (if new logs are added)
+						if step_id not in self.last_log_line:
+							self.last_log_line[step_id] = 0
+
+						# Only print new logs from the last position onward
+						new_logs = logs[self.last_log_line[step_id]:]
+						if new_logs:
+							logging.info(new_logs)
+						
+						self.last_log_line[step_id] = len(logs)
+						
+				  if run_status == 10:
+					logging.debug("Job completed successfully")
+					return True
+				  elif run_status == 20:
+					logging.error(f"Job failed with status: {status_message}")
+					return False
+				  elif run_status == 30:
+					logging.warning(f"Job was cancelled.")
+					return False
+				  else:
+					logging.debug(f"Job status: {run_status}. Pooling again...")
+			   else:
+				  logging.warning(f"Failed to get job status. Status code: {response.status_code} at {retry+1} try.")
+				  retry+=1
+				  if retry > 2:
+					return False
+
+			   time.sleep(30)
+
+	
+	def get_artifacts(self, run_id):
+		headers = {
+			     'Authorization': f'Bearer {self.api_token}',
+			     'Content-Type': 'application/json'
+		}
+		base_artifacts_url = f"{self.base_url}/accounts/{self.account_id}/runs/{run_id}/artifacts"
+		for artifact in ['manifest', 'catelog']:
+			logging.info(f"Getting {artifact} run_id: {run_id}")
+			url = f"{base_artifacts_url}/{artifact}.json
+			response = requests.get(url, headers=headers)
+			if response.status_code == 200:
+				artifact_data = response.json()
+				with open(f'{artifact}.json', 'w') as file:
+					    json.dump(artifact_data, file, indent=4)
+				logging.info(f"{artifact.capitalize()} file download successfully.")
+			else:
+				logging.error(f"Failed to download {artifact}. Status code: {response.status_code}")
+				return False
+		return True
+
+	def orchestrate_dbt_cloud_job(self):
+		# Trigger the job
+				  
